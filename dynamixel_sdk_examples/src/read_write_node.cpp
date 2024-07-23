@@ -18,8 +18,10 @@
 // To test this example, please follow the commands below.
 //
 // Open terminal #1
-// $ ros2 run dynamixel_sdk_examples read_write_node
-//
+// $ sudo usermod -aG dialout {your_linux_account}
+// $ sudo udevadm control --reload-rules && sudo udevadm trigger
+// $ ros2 run read_write_node
+// package name: dynamixel_sdk_examples
 // Open terminal #2 (run one of below commands at a time)
 // $ ros2 topic pub -1 /set_position dynamixel_sdk_custom_interfaces/SetPosition "{id: 1, position: 1000}"
 // $ ros2 service call /get_position dynamixel_sdk_custom_interfaces/srv/GetPosition "id: 1"
@@ -30,6 +32,7 @@
 #include <cstdio>
 #include <memory>
 #include <string>
+#include <signal.h>
 
 #include "dynamixel_sdk/dynamixel_sdk.h"
 #include "dynamixel_sdk_custom_interfaces/msg/set_position.hpp"
@@ -41,16 +44,19 @@
 
 // Control table address for X series (except XL-320)
 #define ADDR_OPERATING_MODE 11
-#define ADDR_TORQUE_ENABLE 64
-#define ADDR_GOAL_POSITION 116
-#define ADDR_PRESENT_POSITION 132
+#define ADDR_TORQUE_ENABLE 24
+#define ADDR_GOAL_POSITION 30
+#define ADDR_PRESENT_POSITION 36
 
 // Protocol version
-#define PROTOCOL_VERSION 2.0  // Default Protocol version of DYNAMIXEL X series.
+#define PROTOCOL_VERSION 1.0  // Default Protocol version of DYNAMIXEL X series.
 
 // Default setting
 #define BAUDRATE 57600  // Default Baudrate of DYNAMIXEL X series
-#define DEVICE_NAME "/dev/ttyUSB0"  // [Linux]: "/dev/ttyUSB*", [Windows]: "COM*"
+#define DEVICE_NAME "/dev/ttyUSBDynamixel"  // [Linux]: "/dev/ttyUSB*", [Windows]: "COM*"
+const unsigned int POSE_INIT = 1800;
+const unsigned int POSE_DOWN = 1200;
+uint8_t ID = 1;
 
 dynamixel::PortHandler * portHandler;
 dynamixel::PacketHandler * packetHandler;
@@ -86,13 +92,8 @@ ReadWriteNode::ReadWriteNode()
       // Write Goal Position (length : 4 bytes)
       // When writing 2 byte data to AX / MX(1.0), use write2ByteTxRx() instead.
       dxl_comm_result =
-      packetHandler->write4ByteTxRx(
-        portHandler,
-        (uint8_t) msg->id,
-        ADDR_GOAL_POSITION,
-        goal_position,
-        &dxl_error
-      );
+      packetHandler->write4ByteTxRx( 
+        portHandler, (uint8_t) msg->id, ADDR_GOAL_POSITION, goal_position, &dxl_error);
 
       if (dxl_comm_result != COMM_SUCCESS) {
         RCLCPP_INFO(this->get_logger(), "%s", packetHandler->getTxRxResult(dxl_comm_result));
@@ -112,19 +113,11 @@ ReadWriteNode::ReadWriteNode()
       // Read Present Position (length : 4 bytes) and Convert uint32 -> int32
       // When reading 2 byte data from AX / MX(1.0), use read2ByteTxRx() instead.
       dxl_comm_result = packetHandler->read4ByteTxRx(
-        portHandler,
-        (uint8_t) request->id,
-        ADDR_PRESENT_POSITION,
-        reinterpret_cast<uint32_t *>(&present_position),
-        &dxl_error
-      );
+        portHandler, (uint8_t) request->id, ADDR_PRESENT_POSITION,
+        reinterpret_cast<uint32_t *>(&present_position), &dxl_error);
 
       RCLCPP_INFO(
-        this->get_logger(),
-        "Get [ID: %d] [Present Position: %d]",
-        request->id,
-        present_position
-      );
+        this->get_logger(), "Get [ID: %d] [Present Position: %d]", request->id, present_position);
 
       response->position = present_position;
     };
@@ -139,6 +132,7 @@ ReadWriteNode::~ReadWriteNode()
 void setupDynamixel(uint8_t dxl_id)
 {
   // Use Position Control Mode
+  /*
   dxl_comm_result = packetHandler->write1ByteTxRx(
     portHandler,
     dxl_id,
@@ -151,22 +145,29 @@ void setupDynamixel(uint8_t dxl_id)
     RCLCPP_ERROR(rclcpp::get_logger("read_write_node"), "Failed to set Position Control Mode.");
   } else {
     RCLCPP_INFO(rclcpp::get_logger("read_write_node"), "Succeeded to set Position Control Mode.");
-  }
+  }*/
 
   // Enable Torque of DYNAMIXEL
   dxl_comm_result = packetHandler->write1ByteTxRx(
-    portHandler,
-    dxl_id,
-    ADDR_TORQUE_ENABLE,
-    1,
-    &dxl_error
-  );
-
+    portHandler, dxl_id, ADDR_TORQUE_ENABLE, 1, &dxl_error);
   if (dxl_comm_result != COMM_SUCCESS) {
     RCLCPP_ERROR(rclcpp::get_logger("read_write_node"), "Failed to enable torque.");
   } else {
     RCLCPP_INFO(rclcpp::get_logger("read_write_node"), "Succeeded to enable torque.");
   }
+}
+
+void signalHandler(int signum)
+{
+  std::cout << std::endl << "Interrupt signal (" << signum << ") received." << std::endl;
+  dxl_comm_result =
+    packetHandler->write4ByteTxRx(portHandler, ID, ADDR_GOAL_POSITION, POSE_DOWN, &dxl_error);
+  if (dxl_comm_result == false) {
+    std::cout << "Failed to open the port, could not send final pose to Dynamixel!" << std::endl;
+  } else {
+    std::cout << "Succeeded to open the port and send final pose to Dynamixel!" << std::endl;
+  }
+  exit(signum);
 }
 
 int main(int argc, char * argv[])
@@ -191,9 +192,17 @@ int main(int argc, char * argv[])
   } else {
     RCLCPP_INFO(rclcpp::get_logger("read_write_node"), "Succeeded to set the baudrate.");
   }
+  dxl_comm_result =
+    packetHandler->write4ByteTxRx(portHandler, ID, ADDR_GOAL_POSITION, POSE_INIT, &dxl_error);
+  if (dxl_comm_result != COMM_SUCCESS) {
+    RCLCPP_ERROR(rclcpp::get_logger("read_write_node"), "Failed to set the initial pose!");
+    return -1;
+  } else {
+    RCLCPP_INFO(rclcpp::get_logger("read_write_node"), "Succeeded to set the initial pose.");
+  }
 
   setupDynamixel(BROADCAST_ID);
-
+  signal(SIGINT, signalHandler);
   rclcpp::init(argc, argv);
 
   auto readwritenode = std::make_shared<ReadWriteNode>();
@@ -201,13 +210,7 @@ int main(int argc, char * argv[])
   rclcpp::shutdown();
 
   // Disable Torque of DYNAMIXEL
-  packetHandler->write1ByteTxRx(
-    portHandler,
-    BROADCAST_ID,
-    ADDR_TORQUE_ENABLE,
-    0,
-    &dxl_error
-  );
+  packetHandler->write1ByteTxRx(portHandler, BROADCAST_ID, ADDR_TORQUE_ENABLE, 0, &dxl_error);
 
   return 0;
 }
